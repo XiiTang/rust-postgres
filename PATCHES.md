@@ -14,7 +14,9 @@ Changes:
 
 - **Protocol 3.2 keys and negotiation** (postgres-protocol). `BackendKeyData`
   keeps the whole cancel key, 4 to 256 bytes, refusing any other length;
-  `NegotiateProtocolVersion` is parsed; `startup_message_with_version` names the
+  `NegotiateProtocolVersion` is parsed, its version read whole, the major in the
+  high 16 bits, as servers send it (PostgreSQL 14 sends 3.0) and libpq reads it,
+  and a major other than 3 refused; `startup_message_with_version` names the
   requested minor version and `cancel_request_with_key` sends the whole key.
   Regression: `backend_key_data_*`, `negotiate_protocol_version_*`,
   `startup_message_names_the_requested_minor_version`,
@@ -36,8 +38,7 @@ Changes:
 - **Raw exchanges.** `Client::exchange` writes a request's initial messages and
   returns a `RawWriter` for what follows (CopyData, CopyDone, CopyFail, Sync),
   which holds the write side until dropped, and `RawResponses`, every backend
-  message through ReadyForQuery, ErrorResponse included. `dispatched` says
-  whether the initial messages reached the stream. NoticeResponse and
+  message through ReadyForQuery, ErrorResponse included. NoticeResponse and
   ParameterStatus arriving while a raw exchange is in flight are among its
   responses; otherwise they are `AsyncMessage::Notice` and the new
   `AsyncMessage::Parameter`. `Error::kind` names the failure kind and

@@ -1,8 +1,8 @@
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, read_error};
 use crate::copy_in::CopyInReceiver;
-use crate::raw::RawReceiver;
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::raw::RawReceiver;
 use crate::{AsyncMessage, Error, Notification};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;

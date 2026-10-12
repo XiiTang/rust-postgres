@@ -731,7 +731,10 @@ impl Client {
     ) -> Result<(crate::raw::RawWriter, crate::raw::RawResponses), Error> {
         let (writer, receiver) = crate::raw::writer(initial);
         let responses = self.inner.send(RequestMessages::Raw(receiver))?;
-        Ok((writer, crate::raw::RawResponses::new(responses.into_receiver())))
+        Ok((
+            writer,
+            crate::raw::RawResponses::new(responses.into_receiver()),
+        ))
     }
 
     /// Constructs a cancellation token that can later be used to request cancellation of a query running on the

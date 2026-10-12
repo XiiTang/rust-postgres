@@ -365,7 +365,7 @@ impl error::Error for MessageTooLarge {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolVersionUnsupported {
     /// The newest minor version of protocol 3 the server supports.
-    pub newest_minor_version: i32,
+    pub newest_minor_version: u16,
     /// The requested protocol options the server did not recognize.
     pub options: Vec<String>,
 }

@@ -1,11 +1,11 @@
+use crate::Error;
+use crate::error::MessageTooLarge;
 use bytes::{Buf, Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend;
 use postgres_protocol::message::frontend::CopyData;
-use std::io;
-use crate::Error;
-use crate::error::MessageTooLarge;
 use std::fmt;
+use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {

@@ -30,7 +30,12 @@ fn ready() -> Vec<u8> {
 
 fn notice(text: &str) -> Vec<u8> {
     let mut body = Vec::new();
-    for (field, value) in [(b'S', "NOTICE"), (b'V', "NOTICE"), (b'C', "00000"), (b'M', text)] {
+    for (field, value) in [
+        (b'S', "NOTICE"),
+        (b'V', "NOTICE"),
+        (b'C', "00000"),
+        (b'M', text),
+    ] {
         body.push(field);
         body.extend(cstr(value));
     }
@@ -156,7 +161,7 @@ async fn negotiate_protocol_version_ends_the_startup() {
     let (client_side, mut peer) = tokio::io::duplex(1 << 16);
     let server = tokio::spawn(async move {
         read_startup(&mut peer).await;
-        let mut body = 0i32.to_be_bytes().to_vec();
+        let mut body = (3u32 << 16).to_be_bytes().to_vec();
         body.extend_from_slice(&0i32.to_be_bytes());
         peer.write_all(&message(b'v', &body)).await.unwrap();
         peer
@@ -232,20 +237,21 @@ async fn an_exchange_reads_its_notices_and_errors_in_order_and_holds_the_writer(
     let (second, mut second_responses) = client.exchange(query("SELECT 2")).unwrap();
     let (tag, _) = read_message(&mut peer).await;
     assert_eq!(tag, b'Q');
-    assert!(writer.dispatched());
     let mut reply = parameter("TimeZone", "UTC");
     reply.extend(notice("first"));
     reply.extend(message(b'G', &[0, 0, 0]));
     peer.write_all(&reply).await.unwrap();
-    // The second exchange waits while the first one's writer is held.
-    writer.send(Bytes::from_static(b"c\0\0\0\x04")).await.unwrap();
+    // The second exchange waits while the first one's writer is held: its
+    // query follows the writer's CopyDone.
+    writer
+        .send(Bytes::from_static(b"c\0\0\0\x04"))
+        .await
+        .unwrap();
     let (tag, _) = read_message(&mut peer).await;
     assert_eq!(tag, b'c');
-    assert!(!second.dispatched());
     drop(writer);
     let (tag, _) = read_message(&mut peer).await;
     assert_eq!(tag, b'Q');
-    assert!(second.dispatched());
     let mut reply = message(b'E', b"SERROR\0C22000\0Mbad\0\0");
     reply.extend(ready());
     reply.extend(message(b'C', b"SELECT 0\0"));

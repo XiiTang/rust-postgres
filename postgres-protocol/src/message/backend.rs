@@ -209,7 +209,16 @@ impl Message {
                 })
             }
             NEGOTIATE_PROTOCOL_VERSION_TAG => {
-                let newest_minor_version = buf.read_i32::<BigEndian>()?;
+                // The whole version, the major in its high 16 bits, as every
+                // server sends it and libpq reads it.
+                let version = buf.read_u32::<BigEndian>()?;
+                if version >> 16 != 3 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "NegotiateProtocolVersion names a protocol other than 3",
+                    ));
+                }
+                let newest_minor_version = version as u16;
                 let len = buf.read_i32::<BigEndian>()?;
                 let storage = buf.read_all();
                 Message::NegotiateProtocolVersion(NegotiateProtocolVersionBody {
@@ -452,15 +461,15 @@ impl BackendKeyDataBody {
 /// The server's answer to a startup request naming a minor protocol version
 /// or `_pq_.` options it does not support.
 pub struct NegotiateProtocolVersionBody {
-    newest_minor_version: i32,
+    newest_minor_version: u16,
     len: i32,
     storage: Bytes,
 }
 
 impl NegotiateProtocolVersionBody {
-    /// The newest minor version of the requested major version the server supports.
+    /// The newest minor version of protocol 3 the server supports.
     #[inline]
-    pub fn newest_minor_version(&self) -> i32 {
+    pub fn newest_minor_version(&self) -> u16 {
         self.newest_minor_version
     }
 
@@ -1020,12 +1029,19 @@ mod tests {
 
     #[test]
     fn negotiate_protocol_version_names_the_newest_minor_and_unknown_options() {
-        let mut body = 0i32.to_be_bytes().to_vec();
-        body.extend_from_slice(&1i32.to_be_bytes());
-        body.extend_from_slice(b"_pq_.example\0");
-        let Message::NegotiateProtocolVersion(negotiated) =
-            message(NEGOTIATE_PROTOCOL_VERSION_TAG, &body)
-        else {
+        let negotiated = |version: u32| {
+            let mut body = version.to_be_bytes().to_vec();
+            body.extend_from_slice(&1i32.to_be_bytes());
+            body.extend_from_slice(b"_pq_.example\0");
+            let mut buf = BytesMut::from(&[NEGOTIATE_PROTOCOL_VERSION_TAG][..]);
+            buf.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+            buf.extend_from_slice(&body);
+            Message::parse(&mut buf)
+        };
+        // PostgreSQL 14 sends PG_PROTOCOL_LATEST, 3.0; a major other than 3
+        // is refused.
+        assert!(negotiated(2 << 16).is_err());
+        let Ok(Some(Message::NegotiateProtocolVersion(negotiated))) = negotiated(3 << 16) else {
             panic!("not NegotiateProtocolVersion");
         };
         assert_eq!(negotiated.newest_minor_version(), 0);

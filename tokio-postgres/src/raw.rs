@@ -19,8 +19,6 @@ use postgres_protocol::message::frontend;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
@@ -311,16 +309,11 @@ where
 
 pub(crate) fn writer(initial: Bytes) -> (RawWriter, RawReceiver) {
     let (sender, rest) = mpsc::channel(0);
-    let dispatched = Arc::new(AtomicBool::new(false));
     (
-        RawWriter {
-            sender,
-            dispatched: dispatched.clone(),
-        },
+        RawWriter { sender },
         RawReceiver {
             initial: Some(FrontendMessage::Raw(initial)),
             rest,
-            dispatched,
         },
     )
 }
@@ -329,7 +322,6 @@ pub(crate) fn writer(initial: Bytes) -> (RawWriter, RawReceiver) {
 /// CopyDone, CopyFail or Sync. Each waits until the connection takes it.
 pub struct RawWriter {
     sender: mpsc::Sender<Bytes>,
-    dispatched: Arc<AtomicBool>,
 }
 
 impl RawWriter {
@@ -340,12 +332,6 @@ impl RawWriter {
             .await
             .map_err(|_| Error::closed())
     }
-
-    /// Whether the exchange's initial messages were handed to the stream, after
-    /// which the server may act on them.
-    pub fn dispatched(&self) -> bool {
-        self.dispatched.load(Ordering::Acquire)
-    }
 }
 
 /// The connection's side of a [`RawWriter`].
@@ -353,7 +339,6 @@ impl RawWriter {
 pub struct RawReceiver {
     initial: Option<FrontendMessage>,
     rest: mpsc::Receiver<Bytes>,
-    dispatched: Arc<AtomicBool>,
 }
 
 impl Stream for RawReceiver {
@@ -361,7 +346,6 @@ impl Stream for RawReceiver {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<FrontendMessage>> {
         if let Some(initial) = self.initial.take() {
-            self.dispatched.store(true, Ordering::Release);
             return Poll::Ready(Some(initial));
         }
         self.rest
