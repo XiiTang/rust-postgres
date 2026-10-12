@@ -1,5 +1,6 @@
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec};
+use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, read_error};
 use crate::copy_in::CopyInReceiver;
+use crate::raw::RawReceiver;
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification};
@@ -20,6 +21,7 @@ use tokio_util::codec::Framed;
 pub enum RequestMessages {
     Single(FrontendMessage),
     CopyIn(CopyInReceiver),
+    Raw(RawReceiver),
 }
 
 pub struct Request {
@@ -29,6 +31,9 @@ pub struct Request {
 
 pub struct Response {
     sender: mpsc::Sender<BackendMessages>,
+    /// A raw exchange, which the notices and parameter statuses arriving
+    /// while it is in flight follow.
+    raw: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -89,7 +94,7 @@ where
 
         Pin::new(&mut self.stream)
             .poll_next(cx)
-            .map(|o| o.map(|r| r.map_err(Error::io)))
+            .map(|o| o.map(|r| r.map_err(read_error)))
     }
 
     fn poll_read(&mut self, cx: &mut Context<'_>) -> Result<Option<AsyncMessage>, Error> {
@@ -109,6 +114,34 @@ where
             };
 
             let (mut messages, request_complete) = match message {
+                BackendMessage::Informational(messages) => {
+                    let message = messages.peek().map_err(Error::parse)?;
+                    if let Some(Message::ParameterStatus(body)) = &message {
+                        self.parameters.insert(
+                            body.name().map_err(Error::parse)?.to_string(),
+                            body.value().map_err(Error::parse)?.to_string(),
+                        );
+                    }
+                    if self.responses.front().is_some_and(|response| response.raw) {
+                        (messages, false)
+                    } else {
+                        match message {
+                            Some(Message::NoticeResponse(body)) => {
+                                let error =
+                                    DbError::parse(&mut body.fields()).map_err(Error::parse)?;
+                                return Ok(Some(AsyncMessage::Notice(error)));
+                            }
+                            Some(Message::ParameterStatus(body)) => {
+                                return Ok(Some(AsyncMessage::Parameter {
+                                    name: body.name().map_err(Error::parse)?.to_string(),
+                                    value: body.value().map_err(Error::parse)?.to_string(),
+                                }));
+                            }
+                            _ => return Err(Error::unexpected_message()),
+                        }
+                    }
+                }
+                // A notice the startup read before the connection began.
                 BackendMessage::Async(Message::NoticeResponse(body)) => {
                     let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
                     return Ok(Some(AsyncMessage::Notice(error)));
@@ -120,13 +153,6 @@ where
                         payload: body.message().map_err(Error::parse)?.to_string(),
                     };
                     return Ok(Some(AsyncMessage::Notification(notification)));
-                }
-                BackendMessage::Async(Message::ParameterStatus(body)) => {
-                    self.parameters.insert(
-                        body.name().map_err(Error::parse)?.to_string(),
-                        body.value().map_err(Error::parse)?.to_string(),
-                    );
-                    continue;
                 }
                 BackendMessage::Async(_) => unreachable!(),
                 BackendMessage::Normal {
@@ -158,6 +184,8 @@ where
                 }
                 Poll::Pending => {
                     self.responses.push_front(response);
+                    // A message already paged out of an informational one
+                    // keeps its place as an ordinary part of the response.
                     self.pending_responses.push_back(BackendMessage::Normal {
                         messages,
                         request_complete,
@@ -184,6 +212,7 @@ where
                 trace!("polled new request");
                 self.responses.push_back(Response {
                     sender: request.sender,
+                    raw: matches!(request.messages, RequestMessages::Raw(_)),
                 });
                 Poll::Ready(Some(request.messages))
             }
@@ -257,6 +286,24 @@ where
                         .start_send(message)
                         .map_err(Error::io)?;
                     self.pending_request = Some(RequestMessages::CopyIn(receiver));
+                }
+                RequestMessages::Raw(mut receiver) => {
+                    let message = match receiver.poll_next_unpin(cx) {
+                        Poll::Ready(Some(message)) => message,
+                        Poll::Ready(None) => {
+                            trace!("poll_write: finished raw request");
+                            continue;
+                        }
+                        Poll::Pending => {
+                            trace!("poll_write: waiting on raw writer");
+                            self.pending_request = Some(RequestMessages::Raw(receiver));
+                            return Ok(true);
+                        }
+                    };
+                    Pin::new(&mut self.stream)
+                        .start_send(message)
+                        .map_err(Error::io)?;
+                    self.pending_request = Some(RequestMessages::Raw(receiver));
                 }
             }
         }

@@ -70,7 +70,8 @@ where
             }
 
             match ready!(Pin::new(&mut self.inner).poll_next(cx)) {
-                Some(Ok(BackendMessage::Normal { messages, .. })) => self.buf = messages,
+                Some(Ok(BackendMessage::Normal { messages, .. }))
+                | Some(Ok(BackendMessage::Informational(messages))) => self.buf = messages,
                 Some(Ok(BackendMessage::Async(message))) => return Poll::Ready(Some(Ok(message))),
                 Some(Err(e)) => return Poll::Ready(Some(Err(e))),
                 None => return Poll::Ready(None),
@@ -99,7 +100,7 @@ where
     .await?;
 
     let mut stream = StartupStream {
-        inner: Framed::new(stream, PostgresCodec),
+        inner: Framed::new(stream, PostgresCodec::new(usize::MAX)),
         buf: BackendMessages::empty(),
         delayed: VecDeque::new(),
     };

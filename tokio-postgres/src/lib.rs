@@ -174,6 +174,7 @@ mod generic_client;
 mod keepalive;
 mod maybe_tls_stream;
 mod portal;
+pub mod raw;
 mod prepare;
 mod query;
 pub mod row;
@@ -244,6 +245,13 @@ pub enum AsyncMessage {
     ///
     /// Connections can subscribe to notifications with the `LISTEN` command.
     Notification(Notification),
+    /// A run-time parameter's new value, reported outside any raw exchange.
+    Parameter {
+        /// The parameter's name.
+        name: String,
+        /// Its value.
+        value: String,
+    },
 }
 
 /// Message returned by the `SimpleQuery` stream.

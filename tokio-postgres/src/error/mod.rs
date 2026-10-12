@@ -86,7 +86,8 @@ pub struct DbError {
 }
 
 impl DbError {
-    pub(crate) fn parse(fields: &mut ErrorFields<'_>) -> io::Result<DbError> {
+    /// Parses the fields of an ErrorResponse or a NoticeResponse.
+    pub fn parse(fields: &mut ErrorFields<'_>) -> io::Result<DbError> {
         let mut severity = None;
         let mut parsed_severity = None;
         let mut code = None;
@@ -337,6 +338,73 @@ pub enum ErrorPosition {
     },
 }
 
+/// A backend message longer than the codec's maximum, refused before it was
+/// buffered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageTooLarge {
+    /// The message's length, its type byte included.
+    pub length: usize,
+    /// The longest message accepted.
+    pub maximum: usize,
+}
+
+impl fmt::Display for MessageTooLarge {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "backend message of {} bytes exceeds the maximum of {}",
+            self.length, self.maximum
+        )
+    }
+}
+
+impl error::Error for MessageTooLarge {}
+
+/// The server's NegotiateProtocolVersion: it does not support the minor
+/// version or the protocol options the startup message requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolVersionUnsupported {
+    /// The newest minor version of protocol 3 the server supports.
+    pub newest_minor_version: i32,
+    /// The requested protocol options the server did not recognize.
+    pub options: Vec<String>,
+}
+
+impl fmt::Display for ProtocolVersionUnsupported {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "server supports protocol 3.{} at most",
+            self.newest_minor_version
+        )
+    }
+}
+
+impl error::Error for ProtocolVersionUnsupported {}
+
+/// What kind of failure an [`Error`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Reading from or writing to the stream failed.
+    Io,
+    /// The server sent a message the client did not expect.
+    UnexpectedMessage,
+    /// A message from the server could not be parsed.
+    Parse,
+    /// The connection is closed.
+    Closed,
+    /// The server sent an ErrorResponse; the cause is a [`DbError`].
+    Db,
+    /// Authentication failed; the cause is the authenticator's error.
+    Authentication,
+    /// The server sent NegotiateProtocolVersion; the cause is a
+    /// [`ProtocolVersionUnsupported`].
+    ProtocolVersion,
+    /// Any other failure.
+    Other,
+}
+
 #[derive(Debug, PartialEq)]
 enum Kind {
     Io,
@@ -358,6 +426,7 @@ enum Kind {
     #[cfg(feature = "runtime")]
     Connect,
     Timeout,
+    ProtocolVersion,
 }
 
 struct ErrorInner {
@@ -401,6 +470,7 @@ impl fmt::Display for Error {
             #[cfg(feature = "runtime")]
             Kind::Connect => fmt.write_str("error connecting to server"),
             Kind::Timeout => fmt.write_str("timeout waiting for server"),
+            Kind::ProtocolVersion => fmt.write_str("protocol version not supported by server"),
         }
     }
 }
@@ -422,6 +492,20 @@ impl Error {
     /// This is a simple convenience method.
     pub fn as_db_error(&self) -> Option<&DbError> {
         self.source().and_then(|e| e.downcast_ref::<DbError>())
+    }
+
+    /// What kind of failure this is.
+    pub fn kind(&self) -> ErrorKind {
+        match self.0.kind {
+            Kind::Io => ErrorKind::Io,
+            Kind::UnexpectedMessage => ErrorKind::UnexpectedMessage,
+            Kind::Parse => ErrorKind::Parse,
+            Kind::Closed => ErrorKind::Closed,
+            Kind::Db => ErrorKind::Db,
+            Kind::Authentication => ErrorKind::Authentication,
+            Kind::ProtocolVersion => ErrorKind::ProtocolVersion,
+            _ => ErrorKind::Other,
+        }
     }
 
     /// Determines if the error was associated with closed connection.
@@ -495,6 +579,10 @@ impl Error {
 
     pub(crate) fn authentication(e: Box<dyn error::Error + Sync + Send>) -> Error {
         Error::new(Kind::Authentication, Some(e))
+    }
+
+    pub(crate) fn protocol_version(e: ProtocolVersionUnsupported) -> Error {
+        Error::new(Kind::ProtocolVersion, Some(Box::new(e)))
     }
 
     pub(crate) fn config_parse(e: Box<dyn error::Error + Sync + Send>) -> Error {

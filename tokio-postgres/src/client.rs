@@ -62,6 +62,10 @@ impl Responses {
     pub async fn next(&mut self) -> Result<Message, Error> {
         future::poll_fn(|cx| self.poll_next(cx)).await
     }
+
+    pub(crate) fn into_receiver(self) -> mpsc::Receiver<BackendMessages> {
+        self.receiver
+    }
 }
 
 /// A cache of type info and prepared statements for fetching type info
@@ -714,6 +718,20 @@ impl Client {
     /// attributes.
     pub fn build_transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder::new(self)
+    }
+
+    /// Writes `initial`, one or more frontend messages, as one request, and
+    /// returns the writer of what follows it and every backend message that
+    /// answers it, through its ReadyForQuery. No other request is written
+    /// while the writer is held. Notices and parameter statuses arriving while
+    /// it is in flight are among its responses.
+    pub fn exchange(
+        &self,
+        initial: bytes::Bytes,
+    ) -> Result<(crate::raw::RawWriter, crate::raw::RawResponses), Error> {
+        let (writer, receiver) = crate::raw::writer(initial);
+        let responses = self.inner.send(RequestMessages::Raw(receiver))?;
+        Ok((writer, crate::raw::RawResponses::new(responses.into_receiver())))
     }
 
     /// Constructs a cancellation token that can later be used to request cancellation of a query running on the
