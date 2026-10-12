@@ -117,6 +117,9 @@ pub struct Startup {
     pub notices: Vec<DbError>,
 }
 
+/// The startup's reader. Upstream's `StartupStream` yields `io::Result`,
+/// which its callers classify as I/O; this one keeps a malformed message a
+/// parse error, as the connection's reads do through `read_error`.
 struct Reader<S> {
     inner: Framed<MaybeTlsStream<S, NoTlsStream>, PostgresCodec>,
     buf: BackendMessages,
@@ -302,12 +305,7 @@ where
         first_word,
     );
     // The codec ends a batch at ReadyForQuery, so nothing read is left over.
-    let connection = Connection::new(
-        reader.inner,
-        VecDeque::new(),
-        parameters.iter().cloned().collect(),
-        receiver,
-    );
+    let connection = Connection::new(reader.inner, VecDeque::new(), None, receiver);
     Ok((
         client,
         connection,

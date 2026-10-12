@@ -122,7 +122,7 @@ where
         process_id,
         secret_key,
     );
-    let connection = Connection::new(stream.inner, stream.delayed, parameters, receiver);
+    let connection = Connection::new(stream.inner, stream.delayed, Some(parameters), receiver);
 
     Ok((client, connection))
 }

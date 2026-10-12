@@ -53,7 +53,9 @@ enum State {
 #[must_use = "futures do nothing unless polled"]
 pub struct Connection<S, T> {
     stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
-    parameters: HashMap<String, String>,
+    /// The latest value of each parameter status; a raw connection keeps
+    /// none, leaving them to its caller.
+    parameters: Option<HashMap<String, String>>,
     receiver: mpsc::UnboundedReceiver<Request>,
     pending_request: Option<RequestMessages>,
     pending_responses: VecDeque<BackendMessage>,
@@ -69,7 +71,7 @@ where
     pub(crate) fn new(
         stream: Framed<MaybeTlsStream<S, T>, PostgresCodec>,
         pending_responses: VecDeque<BackendMessage>,
-        parameters: HashMap<String, String>,
+        parameters: Option<HashMap<String, String>>,
         receiver: mpsc::UnboundedReceiver<Request>,
     ) -> Connection<S, T> {
         Connection {
@@ -116,8 +118,10 @@ where
             let (mut messages, request_complete) = match message {
                 BackendMessage::Informational(messages) => {
                     let message = messages.peek().map_err(Error::parse)?;
-                    if let Some(Message::ParameterStatus(body)) = &message {
-                        self.parameters.insert(
+                    if let (Some(Message::ParameterStatus(body)), Some(parameters)) =
+                        (&message, &mut self.parameters)
+                    {
+                        parameters.insert(
                             body.name().map_err(Error::parse)?.to_string(),
                             body.value().map_err(Error::parse)?.to_string(),
                         );
@@ -340,9 +344,10 @@ where
         }
     }
 
-    /// Returns the value of a runtime parameter for this connection.
+    /// Returns the value of a runtime parameter for this connection; always
+    /// `None` for a raw connection, which keeps none.
     pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters.get(name).map(|s| &**s)
+        self.parameters.as_ref()?.get(name).map(|s| &**s)
     }
 
     fn poll_message_inner(

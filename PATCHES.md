@@ -44,7 +44,9 @@ Changes:
   message through ReadyForQuery, ErrorResponse included. NoticeResponse and
   ParameterStatus arriving while a raw exchange is in flight are among its
   responses; otherwise they are `AsyncMessage::Notice` and the new
-  `AsyncMessage::Parameter`. `Error::kind` names the failure kind and
+  `AsyncMessage::Parameter`. A raw connection keeps no parameter cache, so
+  `Connection::parameter` is `None` and a server cannot grow it; upstream
+  connections keep theirs. `Error::kind` names the failure kind and
   `DbError::parse` is public. Regression:
   `an_exchange_reads_its_notices_and_errors_in_order_and_holds_the_writer`.
 

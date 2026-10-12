@@ -141,10 +141,12 @@ async fn startup_requests_the_minor_version_and_reports_the_whole_key() {
         peer
     });
     let mut recorder = Recorder::default();
-    let (_client, _connection, startup) =
+    let (_client, connection, startup) =
         connect_raw_with(client_side, &config(2, 1 << 16), &mut recorder)
             .await
             .unwrap();
+    // The caller keeps the parameters; the connection keeps none.
+    assert_eq!(connection.parameter("server_version"), None);
     server.await.unwrap();
     assert_eq!(
         recorder.requests,
