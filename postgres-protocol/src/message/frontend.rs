@@ -113,10 +113,17 @@ where
 
 #[inline]
 pub fn cancel_request(process_id: i32, secret_key: i32, buf: &mut BytesMut) {
+    cancel_request_with_key(process_id, &secret_key.to_be_bytes(), buf)
+}
+
+/// A cancel request carrying the whole secret key the server gave: 4 bytes
+/// under protocol 3.0, up to 256 under 3.2.
+#[inline]
+pub fn cancel_request_with_key(process_id: i32, secret_key: &[u8], buf: &mut BytesMut) {
     write_body(buf, |buf| {
         buf.put_i32(80_877_102);
         buf.put_i32(process_id);
-        buf.put_i32(secret_key);
+        buf.put_slice(secret_key);
         Ok::<_, io::Error>(())
     })
     .unwrap();
@@ -258,9 +265,22 @@ pub fn startup_message<'a, I>(parameters: I, buf: &mut BytesMut) -> io::Result<(
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
+    startup_message_with_version(0, parameters, buf)
+}
+
+/// A startup message requesting protocol 3.`minor_version`.
+#[inline]
+pub fn startup_message_with_version<'a, I>(
+    minor_version: u16,
+    parameters: I,
+    buf: &mut BytesMut,
+) -> io::Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
     write_body(buf, |buf| {
-        // postgres protocol version 3.0(196608) in big-endian
-        buf.put_i32(0x00_03_00_00);
+        // The major version, 3, in the high 16 bits.
+        buf.put_i32(0x00_03_00_00 | i32::from(minor_version));
         for (key, value) in parameters {
             write_cstr(key.as_bytes(), buf)?;
             write_cstr(value.as_bytes(), buf)?;
@@ -299,4 +319,24 @@ fn write_cstr(s: &[u8], buf: &mut BytesMut) -> Result<(), io::Error> {
     buf.put_slice(s);
     buf.put_u8(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn startup_message_names_the_requested_minor_version() {
+        let mut buf = BytesMut::new();
+        startup_message_with_version(2, [("user", "u")], &mut buf).unwrap();
+        assert_eq!(&buf[4..8], &[0, 3, 0, 2]);
+    }
+
+    #[test]
+    fn cancel_request_carries_the_whole_key() {
+        let mut buf = BytesMut::new();
+        cancel_request_with_key(5, &[1; 32], &mut buf);
+        assert_eq!(&buf[..4], &(4 + 4 + 4 + 32u32).to_be_bytes());
+        assert_eq!(&buf[12..], &[1; 32]);
+    }
 }

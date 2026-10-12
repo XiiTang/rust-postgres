@@ -32,6 +32,7 @@ pub const PARAMETER_STATUS_TAG: u8 = b'S';
 pub const PARAMETER_DESCRIPTION_TAG: u8 = b't';
 pub const ROW_DESCRIPTION_TAG: u8 = b'T';
 pub const READY_FOR_QUERY_TAG: u8 = b'Z';
+pub const NEGOTIATE_PROTOCOL_VERSION_TAG: u8 = b'v';
 
 #[derive(Debug, Copy, Clone)]
 pub struct Header {
@@ -96,6 +97,7 @@ pub enum Message {
     DataRow(DataRowBody),
     EmptyQueryResponse,
     ErrorResponse(ErrorResponseBody),
+    NegotiateProtocolVersion(NegotiateProtocolVersionBody),
     NoData,
     NoticeResponse(NoticeResponseBody),
     NotificationResponse(NotificationResponseBody),
@@ -193,10 +195,27 @@ impl Message {
             EMPTY_QUERY_RESPONSE_TAG => Message::EmptyQueryResponse,
             BACKEND_KEY_DATA_TAG => {
                 let process_id = buf.read_i32::<BigEndian>()?;
-                let secret_key = buf.read_i32::<BigEndian>()?;
+                // Protocol 3.0 sends a 4-byte key; 3.2 a key of 4 to 256 bytes.
+                let secret_key = buf.read_all();
+                if !(4..=256).contains(&secret_key.len()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid BackendKeyData secret key length",
+                    ));
+                }
                 Message::BackendKeyData(BackendKeyDataBody {
                     process_id,
                     secret_key,
+                })
+            }
+            NEGOTIATE_PROTOCOL_VERSION_TAG => {
+                let newest_minor_version = buf.read_i32::<BigEndian>()?;
+                let len = buf.read_i32::<BigEndian>()?;
+                let storage = buf.read_all();
+                Message::NegotiateProtocolVersion(NegotiateProtocolVersionBody {
+                    newest_minor_version,
+                    len,
+                    storage,
                 })
             }
             NO_DATA_TAG => Message::NoData,
@@ -407,7 +426,7 @@ impl AuthenticationSaslFinalBody {
 
 pub struct BackendKeyDataBody {
     process_id: i32,
-    secret_key: i32,
+    secret_key: Bytes,
 }
 
 impl BackendKeyDataBody {
@@ -416,9 +435,70 @@ impl BackendKeyDataBody {
         self.process_id
     }
 
+    /// The first four bytes of the secret key, which is the whole key under
+    /// protocol 3.0.
     #[inline]
     pub fn secret_key(&self) -> i32 {
-        self.secret_key
+        i32::from_be_bytes(self.secret_key[..4].try_into().unwrap())
+    }
+
+    /// The whole secret key: 4 bytes under protocol 3.0, up to 256 under 3.2.
+    #[inline]
+    pub fn secret_key_bytes(&self) -> &[u8] {
+        &self.secret_key
+    }
+}
+
+/// The server's answer to a startup request naming a minor protocol version
+/// or `_pq_.` options it does not support.
+pub struct NegotiateProtocolVersionBody {
+    newest_minor_version: i32,
+    len: i32,
+    storage: Bytes,
+}
+
+impl NegotiateProtocolVersionBody {
+    /// The newest minor version of the requested major version the server supports.
+    #[inline]
+    pub fn newest_minor_version(&self) -> i32 {
+        self.newest_minor_version
+    }
+
+    /// The protocol options the server did not recognize.
+    #[inline]
+    pub fn options(&self) -> NegotiatedOptions<'_> {
+        NegotiatedOptions {
+            buf: &self.storage,
+            remaining: self.len,
+        }
+    }
+}
+
+pub struct NegotiatedOptions<'a> {
+    buf: &'a [u8],
+    remaining: i32,
+}
+
+impl<'a> FallibleIterator for NegotiatedOptions<'a> {
+    type Item = &'a str;
+    type Error = io::Error;
+
+    #[inline]
+    fn next(&mut self) -> io::Result<Option<&'a str>> {
+        if self.remaining <= 0 {
+            if self.buf.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid message length: options remaining",
+            ));
+        }
+        self.remaining -= 1;
+        let end = find_null(self.buf, 0)?;
+        let option = get_str(&self.buf[..end])?;
+        self.buf = &self.buf[end + 1..];
+        Ok(Some(option))
     }
 }
 
@@ -900,4 +980,58 @@ fn find_null(buf: &[u8], start: usize) -> io::Result<usize> {
 #[inline]
 fn get_str(buf: &[u8]) -> io::Result<&str> {
     str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(tag: u8, body: &[u8]) -> Message {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&[tag]);
+        buf.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+        buf.extend_from_slice(body);
+        Message::parse(&mut buf).unwrap().unwrap()
+    }
+
+    #[test]
+    fn backend_key_data_keeps_a_protocol_3_2_key_whole() {
+        let mut body = 7i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[9; 32]);
+        let Message::BackendKeyData(key) = message(BACKEND_KEY_DATA_TAG, &body) else {
+            panic!("not BackendKeyData");
+        };
+        assert_eq!(key.process_id(), 7);
+        assert_eq!(key.secret_key_bytes(), &[9; 32]);
+    }
+
+    #[test]
+    fn backend_key_data_refuses_a_key_outside_4_to_256_bytes() {
+        for len in [3, 257] {
+            let mut body = 7i32.to_be_bytes().to_vec();
+            body.extend(std::iter::repeat_n(1, len));
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&[BACKEND_KEY_DATA_TAG]);
+            buf.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+            buf.extend_from_slice(&body);
+            assert!(Message::parse(&mut buf).is_err());
+        }
+    }
+
+    #[test]
+    fn negotiate_protocol_version_names_the_newest_minor_and_unknown_options() {
+        let mut body = 0i32.to_be_bytes().to_vec();
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.extend_from_slice(b"_pq_.example\0");
+        let Message::NegotiateProtocolVersion(negotiated) =
+            message(NEGOTIATE_PROTOCOL_VERSION_TAG, &body)
+        else {
+            panic!("not NegotiateProtocolVersion");
+        };
+        assert_eq!(negotiated.newest_minor_version(), 0);
+        assert_eq!(
+            negotiated.options().collect::<Vec<_>>().unwrap(),
+            ["_pq_.example"]
+        );
+    }
 }
