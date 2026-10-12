@@ -3,10 +3,11 @@
 //!
 //! The caller owns TLS and every authentication exchange; the library frames
 //! the startup and authentication messages, keeps the connection's message
-//! order and bounds each backend message by `RawConfig::max_message`.
+//! order, bounds each backend message by `RawConfig::max_message` and what
+//! the startup keeps by `RawConfig::max_retained`.
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, read_error};
 use crate::config::{SslMode, SslNegotiation};
-use crate::error::{DbError, ProtocolVersionUnsupported};
+use crate::error::{DbError, ProtocolVersionUnsupported, StartupTooLarge};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::NoTlsStream;
 use crate::{Client, Connection, Error};
@@ -14,10 +15,11 @@ use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
 use futures_util::{SinkExt, Stream, StreamExt};
-use postgres_protocol::message::backend::Message;
+use postgres_protocol::message::backend::{Message, NoticeResponseBody};
 use postgres_protocol::message::frontend;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -32,6 +34,9 @@ pub struct RawConfig {
     pub minor_version: u16,
     /// The longest backend message accepted, its type byte included.
     pub max_message: usize,
+    /// The most bytes of notice fields and parameter statuses the startup
+    /// keeps; past it the startup fails with [`StartupTooLarge`].
+    pub max_retained: usize,
 }
 
 /// An authentication request of the server's, as the caller answers it.
@@ -176,6 +181,10 @@ where
     reader.send(buf).await?;
 
     let mut notices = Vec::new();
+    let mut retained = Retained {
+        bytes: 0,
+        maximum: config.max_retained,
+    };
     loop {
         let message = reader.next().await?;
         let mechanisms;
@@ -217,6 +226,7 @@ where
                 }));
             }
             Message::NoticeResponse(body) => {
+                retained.notice(body)?;
                 notices.push(DbError::parse(&mut body.fields()).map_err(Error::parse)?);
                 continue;
             }
@@ -264,11 +274,14 @@ where
                 process_id = body.process_id();
                 secret_key = body.secret_key_bytes().to_vec();
             }
-            Message::ParameterStatus(body) => parameters.push((
-                body.name().map_err(Error::parse)?.to_owned(),
-                body.value().map_err(Error::parse)?.to_owned(),
-            )),
+            Message::ParameterStatus(body) => {
+                let name = body.name().map_err(Error::parse)?;
+                let value = body.value().map_err(Error::parse)?;
+                retained.keep(name.len() + value.len())?;
+                parameters.push((name.to_owned(), value.to_owned()));
+            }
             Message::NoticeResponse(body) => {
+                retained.notice(&body)?;
                 notices.push(DbError::parse(&mut body.fields()).map_err(Error::parse)?)
             }
             Message::ReadyForQuery(_) => break,
@@ -305,6 +318,38 @@ where
             notices,
         },
     ))
+}
+
+/// The bytes a startup keeps, and their bound.
+struct Retained {
+    bytes: usize,
+    maximum: usize,
+}
+
+impl Retained {
+    fn keep(&mut self, bytes: usize) -> Result<(), Error> {
+        let retained = self.bytes.saturating_add(bytes);
+        if retained > self.maximum {
+            return Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                StartupTooLarge {
+                    retained,
+                    maximum: self.maximum,
+                },
+            )));
+        }
+        self.bytes = retained;
+        Ok(())
+    }
+
+    fn notice(&mut self, body: &NoticeResponseBody) -> Result<(), Error> {
+        let mut bytes = 0;
+        let mut fields = body.fields();
+        while let Some(field) = fields.next().map_err(Error::parse)? {
+            bytes += 1 + field.value_bytes().len();
+        }
+        self.keep(bytes)
+    }
 }
 
 pub(crate) fn writer(initial: Bytes) -> (RawWriter, RawReceiver) {

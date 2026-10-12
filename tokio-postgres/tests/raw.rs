@@ -4,7 +4,9 @@ use postgres_protocol::message::backend::Message;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio_postgres::error::{ErrorKind, MessageTooLarge, ProtocolVersionUnsupported};
+use tokio_postgres::error::{
+    ErrorKind, MessageTooLarge, ProtocolVersionUnsupported, StartupTooLarge,
+};
 use tokio_postgres::raw::{
     Authenticate, AuthenticationRequest, AuthenticationResponse, BoxError, RawConfig,
     connect_raw_with,
@@ -92,6 +94,7 @@ fn config(minor_version: u16, max_message: usize) -> RawConfig {
         parameters: vec![("user".into(), "alice".into())],
         minor_version,
         max_message,
+        max_retained: 1 << 16,
     }
 }
 
@@ -206,6 +209,41 @@ async fn a_message_longer_than_the_maximum_is_refused_from_its_header() {
         Some(&MessageTooLarge {
             length: (1 << 20) + 1,
             maximum: 1024
+        })
+    );
+}
+
+#[tokio::test]
+async fn startup_notices_and_parameters_past_the_maximum_end_the_startup() {
+    let (client_side, mut peer) = tokio::io::duplex(1 << 16);
+    let server = tokio::spawn(async move {
+        read_startup(&mut peer).await;
+        let mut reply = message(b'R', &0i32.to_be_bytes());
+        // 1 + 6, 1 + 6, 1 + 5 and 1 + 7 bytes of fields: 28.
+        reply.extend(notice("welcome"));
+        // 14 + 4 bytes: 46 in all, past 40.
+        reply.extend(parameter("server_version", "18.6"));
+        reply.extend(ready());
+        peer.write_all(&reply).await.unwrap();
+        peer
+    });
+    let mut config = config(0, 1 << 16);
+    config.max_retained = 40;
+    let error = connect_raw_with(client_side, &config, &mut Recorder::default())
+        .await
+        .err()
+        .unwrap();
+    let _peer = server.await.unwrap();
+    assert_eq!(error.kind(), ErrorKind::Parse);
+    let io = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<std::io::Error>()
+        .unwrap();
+    assert_eq!(
+        io.get_ref().unwrap().downcast_ref::<StartupTooLarge>(),
+        Some(&StartupTooLarge {
+            retained: 46,
+            maximum: 40
         })
     );
 }

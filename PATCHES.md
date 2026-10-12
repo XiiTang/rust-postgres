@@ -33,8 +33,11 @@ Changes:
   the caller's `Authenticate` and frames its answer; ends at
   NegotiateProtocolVersion with `ProtocolVersionUnsupported`; and returns the
   process ID, the whole cancel key, the parameters and the notices in order.
+  What it keeps of them is bounded by `RawConfig::max_retained`: past it the
+  startup fails with a parse error whose cause is `StartupTooLarge`.
   Regression: `startup_requests_the_minor_version_and_reports_the_whole_key`,
-  `negotiate_protocol_version_ends_the_startup`.
+  `negotiate_protocol_version_ends_the_startup`,
+  `startup_notices_and_parameters_past_the_maximum_end_the_startup`.
 - **Raw exchanges.** `Client::exchange` writes a request's initial messages and
   returns a `RawWriter` for what follows (CopyData, CopyDone, CopyFail, Sync),
   which holds the write side until dropped, and `RawResponses`, every backend
@@ -45,7 +48,7 @@ Changes:
   `DbError::parse` is public. Regression:
   `an_exchange_reads_its_notices_and_errors_in_order_and_holds_the_writer`.
 
-Verification: the four `tokio-postgres --test raw` cases with a scripted
+Verification: the five `tokio-postgres --test raw` cases with a scripted
 backend, and the upstream suites (`cargo test -p tokio-postgres -p postgres -p
 postgres-protocol -p postgres-types --all-features`) against PostgreSQL 18.6
 configured by `docker/sql_setup.sh`.

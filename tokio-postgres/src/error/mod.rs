@@ -360,6 +360,28 @@ impl fmt::Display for MessageTooLarge {
 
 impl error::Error for MessageTooLarge {}
 
+/// What a startup kept of the server's notices and parameter statuses
+/// outgrew `RawConfig::max_retained`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupTooLarge {
+    /// The bytes kept with the message that outgrew the maximum.
+    pub retained: usize,
+    /// The most bytes a startup keeps.
+    pub maximum: usize,
+}
+
+impl fmt::Display for StartupTooLarge {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "startup notices and parameters of {} bytes exceed the maximum of {}",
+            self.retained, self.maximum
+        )
+    }
+}
+
+impl error::Error for StartupTooLarge {}
+
 /// The server's NegotiateProtocolVersion: it does not support the minor
 /// version or the protocol options the startup message requested.
 #[derive(Debug, Clone, PartialEq, Eq)]
