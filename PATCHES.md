@@ -54,3 +54,11 @@ Verification: the five `tokio-postgres --test raw` cases with a scripted
 backend, and the upstream suites (`cargo test -p tokio-postgres -p postgres -p
 postgres-protocol -p postgres-types --all-features`) against PostgreSQL 18.6
 configured by `docker/sql_setup.sh`.
+
+## Fixed constant-time utilities (#312)
+
+Update the workspace lockfile's ctutils 0.4.2 to 0.4.4 for RUSTSEC-2026-0385,
+the smallest fixed patch for mask generation and u128 comparisons. No wire,
+authentication, raw-connection or parameter-cache behavior changes. Regression
+coverage: the postgres, tokio-postgres, postgres-protocol and postgres-types
+suites with all features, plus Boundless's complete PostgreSQL module.
