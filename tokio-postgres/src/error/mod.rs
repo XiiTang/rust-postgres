@@ -382,6 +382,28 @@ impl fmt::Display for StartupTooLarge {
 
 impl error::Error for StartupTooLarge {}
 
+/// A startup's ParameterStatus messages outnumbered
+/// `RawConfig::max_parameters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupTooManyParameters {
+    /// The parameters with the one that outnumbered the maximum.
+    pub count: usize,
+    /// The most parameters a startup keeps.
+    pub maximum: usize,
+}
+
+impl fmt::Display for StartupTooManyParameters {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "{} startup parameters exceed the maximum of {}",
+            self.count, self.maximum
+        )
+    }
+}
+
+impl error::Error for StartupTooManyParameters {}
+
 /// The server's NegotiateProtocolVersion: it does not support the minor
 /// version or the protocol options the startup message requested.
 #[derive(Debug, Clone, PartialEq, Eq)]

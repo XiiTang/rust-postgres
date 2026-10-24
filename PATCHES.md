@@ -62,3 +62,28 @@ the smallest fixed patch for mask generation and u128 comparisons. No wire,
 authentication, raw-connection or parameter-cache behavior changes. Regression
 coverage: the postgres, tokio-postgres, postgres-protocol and postgres-types
 suites with all features, plus Boundless's complete PostgreSQL module.
+
+## Startup ParameterStatus entry cap (driver plan W17c)
+
+Reason: Boundless's driver plan v23, W17c and Rule 11. A raw startup keeps
+each ParameterStatus in order and charged only its name and value bytes against
+`RawConfig::max_retained` (4b86aa1 tokio-postgres/src/raw.rs:280-284), so a
+server repeating ParameterStatus with an empty name and value grew the startup's
+vector without bound while the byte count stayed zero. Upstream's
+`connect_raw` keys parameters by name in a map with no count bound
+(f1cb6ec0 tokio-postgres/src/connect_raw.rs:353-358); its paths are unchanged.
+
+Change: `RawConfig::max_parameters`, set by the caller with no default, is the
+most ParameterStatus messages a raw startup keeps. Each one counts as an entry
+even when both strings are empty. The startup's retention owner (`Retained`)
+holds the parameters and adds one only through `Retained::parameter`, which
+checks the entry count before parsing or inserting, then the bytes. One past the
+maximum ends the startup with a parse error whose cause is
+`StartupTooManyParameters { count, maximum }`, and no partial `Startup` is
+returned. No framing or allocation interface is added.
+
+Regression: `empty_parameter_statuses_past_the_entry_maximum_end_the_startup`
+(`tokio-postgres --test raw`): three empty ParameterStatus messages under a
+maximum of three are kept; a fourth ends the startup with
+`StartupTooManyParameters { count: 4, maximum: 3 }`. Before the change the
+four-entry startup succeeded and the test failed (exit 101).

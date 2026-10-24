@@ -4,10 +4,13 @@
 //! The caller owns TLS and every authentication exchange; the library frames
 //! the startup and authentication messages, keeps the connection's message
 //! order, bounds each backend message by `RawConfig::max_message` and what
-//! the startup keeps by `RawConfig::max_retained`.
+//! the startup keeps by `RawConfig::max_retained` and
+//! `RawConfig::max_parameters`.
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, PostgresCodec, read_error};
 use crate::config::{SslMode, SslNegotiation};
-use crate::error::{DbError, ProtocolVersionUnsupported, StartupTooLarge};
+use crate::error::{
+    DbError, ProtocolVersionUnsupported, StartupTooLarge, StartupTooManyParameters,
+};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::NoTlsStream;
 use crate::{Client, Connection, Error};
@@ -15,7 +18,7 @@ use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
 use futures_util::{SinkExt, Stream, StreamExt};
-use postgres_protocol::message::backend::{Message, NoticeResponseBody};
+use postgres_protocol::message::backend::{Message, NoticeResponseBody, ParameterStatusBody};
 use postgres_protocol::message::frontend;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -37,6 +40,10 @@ pub struct RawConfig {
     /// The most bytes of notice fields and parameter statuses the startup
     /// keeps; past it the startup fails with [`StartupTooLarge`].
     pub max_retained: usize,
+    /// The most ParameterStatus messages the startup keeps, each counted
+    /// even when its name and value are empty; past it the startup fails
+    /// with [`StartupTooManyParameters`].
+    pub max_parameters: usize,
 }
 
 /// An authentication request of the server's, as the caller answers it.
@@ -187,6 +194,8 @@ where
     let mut retained = Retained {
         bytes: 0,
         maximum: config.max_retained,
+        parameters: Vec::new(),
+        max_parameters: config.max_parameters,
     };
     loop {
         let message = reader.next().await?;
@@ -270,19 +279,13 @@ where
 
     let mut process_id = 0;
     let mut secret_key = Vec::new();
-    let mut parameters = Vec::new();
     loop {
         match reader.next().await? {
             Message::BackendKeyData(body) => {
                 process_id = body.process_id();
                 secret_key = body.secret_key_bytes().to_vec();
             }
-            Message::ParameterStatus(body) => {
-                let name = body.name().map_err(Error::parse)?;
-                let value = body.value().map_err(Error::parse)?;
-                retained.keep(name.len() + value.len())?;
-                parameters.push((name.to_owned(), value.to_owned()));
-            }
+            Message::ParameterStatus(body) => retained.parameter(&body)?,
             Message::NoticeResponse(body) => {
                 retained.notice(&body)?;
                 notices.push(DbError::parse(&mut body.fields()).map_err(Error::parse)?)
@@ -312,16 +315,19 @@ where
         Startup {
             process_id,
             secret_key,
-            parameters,
+            parameters: retained.parameters,
             notices,
         },
     ))
 }
 
-/// The bytes a startup keeps, and their bound.
+/// The bytes a startup keeps and the parameters it keeps, and their bounds.
+/// Parameters are added only through [`Retained::parameter`].
 struct Retained {
     bytes: usize,
     maximum: usize,
+    parameters: Vec<(String, String)>,
+    max_parameters: usize,
 }
 
 impl Retained {
@@ -337,6 +343,24 @@ impl Retained {
             )));
         }
         self.bytes = retained;
+        Ok(())
+    }
+
+    /// Keeps a ParameterStatus once its entry and its bytes fit.
+    fn parameter(&mut self, body: &ParameterStatusBody) -> Result<(), Error> {
+        if self.parameters.len() >= self.max_parameters {
+            return Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                StartupTooManyParameters {
+                    count: self.parameters.len() + 1,
+                    maximum: self.max_parameters,
+                },
+            )));
+        }
+        let name = body.name().map_err(Error::parse)?;
+        let value = body.value().map_err(Error::parse)?;
+        self.keep(name.len() + value.len())?;
+        self.parameters.push((name.to_owned(), value.to_owned()));
         Ok(())
     }
 
