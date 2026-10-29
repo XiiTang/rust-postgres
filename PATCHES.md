@@ -89,3 +89,33 @@ Regression: `empty_and_duplicate_startup_parameters_hit_count`
 maximum of three are kept; a fourth ends the startup with
 `StartupTooManyParameters { count: 4, maximum: 3 }`. Before the change the
 four-entry startup succeeded and the test failed (exit 101).
+
+
+### Reconciled W17c2 on the current pin
+
+Source tip 96dcef1df88606e10255c76b5de27e51764df077 is based on
+96ec0be1870a31607969de60c8824703fea273cf. The sole `Retained::parameter`
+checkpoint parses borrowed fields before the occurrence and byte checks; only
+then does it allocate/push. Upstream f1cb6ec0's ordinary parameter map replaces
+same-name entries without a count bound; the pre-existing fork raw startup
+retains every occurrence in order. Keep both existing behaviors, adding only
+the caller-selected raw-startup cap and typed parse cause. No retry, early
+successful Startup, authentication classification, framing, post-startup async
+ParameterStatus or error-cleanup behavior changes. Malformed borrowed fields
+retain their original UTF-8 parser cause even at a full count.
+
+macOS Darwin 27.2.0 arm64 / Rust 1.97.0, all commands through build-slot:
+
+| cargo arguments | Exit / result |
+| --- | --- |
+| test -p tokio-postgres --test raw --locked | 0; 7 scripted-backend tests |
+| clippy -p tokio-postgres --lib --tests --locked -- -D warnings | 0 |
+| fmt --all --check | 0 |
+
+The new `malformed_startup_parameter_keeps_parse_precedence` fails (exit 101)
+when count-before-parse is restored temporarily, and passes after restoration.
+`empty_and_duplicate_startup_parameters_hit_count` accepts exactly N empty or
+duplicate nonempty pairs and withholds ReadyForQuery before asserting Startup
+is still pending; N+1 returns the original typed count/maximum. No server,
+sleep, retry or partial successful Info is involved. This evidence-only commit
+follows the tested source tip. No push or boundless-branch movement occurred.
