@@ -348,6 +348,9 @@ impl Retained {
 
     /// Keeps a ParameterStatus once its entry and its bytes fit.
     fn parameter(&mut self, body: &ParameterStatusBody) -> Result<(), Error> {
+        // Preserve malformed-body precedence before count/byte retention.
+        let name = body.name().map_err(Error::parse)?;
+        let value = body.value().map_err(Error::parse)?;
         if self.parameters.len() >= self.max_parameters {
             return Err(Error::parse(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -357,8 +360,6 @@ impl Retained {
                 },
             )));
         }
-        let name = body.name().map_err(Error::parse)?;
-        let value = body.value().map_err(Error::parse)?;
         self.keep(name.len() + value.len())?;
         self.parameters.push((name.to_owned(), value.to_owned()));
         Ok(())

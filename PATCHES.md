@@ -77,12 +77,14 @@ Change: `RawConfig::max_parameters`, set by the caller with no default, is the
 most ParameterStatus messages a raw startup keeps. Each one counts as an entry
 even when both strings are empty. The startup's retention owner (`Retained`)
 holds the parameters and adds one only through `Retained::parameter`, which
-checks the entry count before parsing or inserting, then the bytes. One past the
+parses borrowed name/value first, then checks occurrence count and retained bytes
+before allocating either string or pushing. This preserves malformed-body error
+precedence at an already full count. One past the
 maximum ends the startup with a parse error whose cause is
 `StartupTooManyParameters { count, maximum }`, and no partial `Startup` is
 returned. No framing or allocation interface is added.
 
-Regression: `empty_parameter_statuses_past_the_entry_maximum_end_the_startup`
+Regression: `empty_and_duplicate_startup_parameters_hit_count`
 (`tokio-postgres --test raw`): three empty ParameterStatus messages under a
 maximum of three are kept; a fourth ends the startup with
 `StartupTooManyParameters { count: 4, maximum: 3 }`. Before the change the

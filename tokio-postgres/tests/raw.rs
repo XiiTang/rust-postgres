@@ -252,54 +252,107 @@ async fn startup_notices_and_parameters_past_the_maximum_end_the_startup() {
     );
 }
 
-/// A startup whose server reports `count` ParameterStatus messages with an
-/// empty name and value: each adds no bytes to what the startup keeps.
-async fn startup_with_empty_parameters(
+/// Every occurrence counts, including repeated empty pairs. Hold ReadyForQuery
+/// at the exact maximum: no successful Startup may precede that real boundary.
+async fn startup_with_parameters(
     count: usize,
+    pair: (&'static str, &'static str),
     config: &RawConfig,
 ) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
     let (client_side, mut peer) = tokio::io::duplex(1 << 16);
+    let (parameters, received) = tokio::sync::oneshot::channel();
+    let (ready_gate, ready_allowed) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         read_startup(&mut peer).await;
         let mut reply = message(b'R', &0i32.to_be_bytes());
         for _ in 0..count {
-            reply.extend(parameter("", ""));
+            reply.extend(parameter(pair.0, pair.1));
         }
-        reply.extend(ready());
         peer.write_all(&reply).await.unwrap();
+        parameters.send(()).unwrap();
+        if ready_allowed.await.is_ok() {
+            peer.write_all(&ready()).await.unwrap();
+        }
         peer
     });
-    let started = connect_raw_with(client_side, config, &mut Recorder::default()).await;
+    let mut recorder = Recorder::default();
+    let mut started = Box::pin(connect_raw_with(client_side, config, &mut recorder));
+    if count <= config.max_parameters {
+        tokio::select! { biased;
+            _ = &mut started => panic!("startup escaped before ReadyForQuery"),
+            _ = received => {},
+        }
+        assert!(futures_util::poll!(&mut started).is_pending());
+        ready_gate.send(()).unwrap();
+    } else {
+        drop(ready_gate);
+    }
+    let started = started.await;
     let _peer = server.await.unwrap();
     started.map(|(_, _, startup)| startup.parameters)
 }
 
 #[tokio::test]
-async fn empty_parameter_statuses_past_the_entry_maximum_end_the_startup() {
+async fn empty_and_duplicate_startup_parameters_hit_count() {
     let mut config = config(0, 1 << 16);
     config.max_parameters = 3;
-    assert_eq!(
-        startup_with_empty_parameters(3, &config).await.unwrap(),
-        vec![(String::new(), String::new()); 3]
-    );
-    let error = startup_with_empty_parameters(4, &config)
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(error.kind(), ErrorKind::Parse);
-    let io = std::error::Error::source(&error)
-        .unwrap()
-        .downcast_ref::<std::io::Error>()
-        .unwrap();
-    assert_eq!(
-        io.get_ref()
+    for pair in [("", ""), ("same", "value")] {
+        assert_eq!(
+            startup_with_parameters(3, pair, &config).await.unwrap(),
+            vec![(pair.0.to_owned(), pair.1.to_owned()); 3]
+        );
+        let error = startup_with_parameters(4, pair, &config)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), ErrorKind::Parse);
+        let io = std::error::Error::source(&error)
             .unwrap()
-            .downcast_ref::<StartupTooManyParameters>(),
-        Some(&StartupTooManyParameters {
-            count: 4,
-            maximum: 3
-        })
-    );
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(
+            io.get_ref()
+                .unwrap()
+                .downcast_ref::<StartupTooManyParameters>(),
+            Some(&StartupTooManyParameters {
+                count: 4,
+                maximum: 3
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_startup_parameter_keeps_parse_precedence() {
+    for body in [b"\xff\0value\0".as_slice(), b"name\0\xff\0".as_slice()] {
+        let (client_side, mut peer) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            read_startup(&mut peer).await;
+            let mut reply = message(b'R', &0i32.to_be_bytes());
+            reply.extend(parameter("", ""));
+            reply.extend(message(b'S', body));
+            peer.write_all(&reply).await.unwrap();
+            peer
+        });
+        let mut config = config(0, 1 << 16);
+        config.max_parameters = 1;
+        let error = connect_raw_with(client_side, &config, &mut Recorder::default())
+            .await
+            .err()
+            .unwrap();
+        let _peer = server.await.unwrap();
+        assert_eq!(error.kind(), ErrorKind::Parse);
+        let io = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert!(
+            io.get_ref()
+                .unwrap()
+                .downcast_ref::<std::str::Utf8Error>()
+                .is_some()
+        );
+    }
 }
 
 fn query(sql: &str) -> Bytes {
