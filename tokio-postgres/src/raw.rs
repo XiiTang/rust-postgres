@@ -124,6 +124,18 @@ pub struct Startup {
     pub notices: Vec<DbError>,
 }
 
+/// A startup that failed, with what the server reported before it failed.
+/// The cancel key is not kept.
+#[derive(Debug)]
+pub struct StartupFailure {
+    /// Why the startup failed.
+    pub error: Error,
+    /// Each ParameterStatus kept before the failure, in order.
+    pub parameters: Vec<(String, String)>,
+    /// Each NoticeResponse kept before the failure, in order.
+    pub notices: Vec<DbError>,
+}
+
 /// The startup's reader. Upstream's `StartupStream` yields `io::Result`,
 /// which its callers classify as I/O; this one keeps a malformed message a
 /// parse error, as the connection's reads do through `read_error`.
@@ -163,11 +175,50 @@ where
 /// sends the startup message, has `authenticate` answer every authentication
 /// request and reads the server's report through its first ReadyForQuery.
 /// The user name is whatever `config.parameters` gives; none is derived.
+/// A failure keeps the parameters and notices read before it.
 pub async fn connect_raw_with<S>(
     stream: S,
     config: &RawConfig,
     authenticate: &mut dyn Authenticate,
-) -> Result<(Client, Connection<S, NoTlsStream>, Startup), Error>
+) -> Result<(Client, Connection<S, NoTlsStream>, Startup), StartupFailure>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut notices = Vec::new();
+    let mut retained = Retained {
+        bytes: 0,
+        maximum: config.max_retained,
+        parameters: Vec::new(),
+        max_parameters: config.max_parameters,
+    };
+    match start(stream, config, authenticate, &mut retained, &mut notices).await {
+        Ok((client, connection, process_id, secret_key)) => Ok((
+            client,
+            connection,
+            Startup {
+                process_id,
+                secret_key,
+                parameters: retained.parameters,
+                notices,
+            },
+        )),
+        Err(error) => Err(StartupFailure {
+            error,
+            parameters: retained.parameters,
+            notices,
+        }),
+    }
+}
+
+/// [`connect_raw_with`]'s startup, keeping what it reads in `retained` and
+/// `notices`, which outlive its failure.
+async fn start<S>(
+    stream: S,
+    config: &RawConfig,
+    authenticate: &mut dyn Authenticate,
+    retained: &mut Retained,
+    notices: &mut Vec<DbError>,
+) -> Result<(Client, Connection<S, NoTlsStream>, i32, Vec<u8>), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -190,13 +241,6 @@ where
         .map_err(Error::encode)?;
     reader.send(buf).await?;
 
-    let mut notices = Vec::new();
-    let mut retained = Retained {
-        bytes: 0,
-        maximum: config.max_retained,
-        parameters: Vec::new(),
-        max_parameters: config.max_parameters,
-    };
     loop {
         let message = reader.next().await?;
         let mechanisms;
@@ -309,16 +353,7 @@ where
     );
     // The codec ends a batch at ReadyForQuery, so nothing read is left over.
     let connection = Connection::new(reader.inner, VecDeque::new(), None, receiver);
-    Ok((
-        client,
-        connection,
-        Startup {
-            process_id,
-            secret_key,
-            parameters: retained.parameters,
-            notices,
-        },
-    ))
+    Ok((client, connection, process_id, secret_key))
 }
 
 /// The bytes a startup keeps and the parameters it keeps, and their bounds.

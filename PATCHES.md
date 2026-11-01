@@ -34,10 +34,13 @@ Changes:
   NegotiateProtocolVersion with `ProtocolVersionUnsupported`; and returns the
   process ID, the whole cancel key, the parameters and the notices in order.
   What it keeps of them is bounded by `RawConfig::max_retained`: past it the
-  startup fails with a parse error whose cause is `StartupTooLarge`.
+  startup fails with a parse error whose cause is `StartupTooLarge`. A failed
+  startup returns `StartupFailure`: the error with the parameters and notices
+  kept before it, never the cancel key.
   Regression: `startup_requests_the_minor_version_and_reports_the_whole_key`,
   `negotiate_protocol_version_ends_the_startup`,
-  `startup_notices_and_parameters_past_the_maximum_end_the_startup`.
+  `startup_notices_and_parameters_past_the_maximum_end_the_startup`,
+  `a_failed_startup_keeps_what_it_read`.
 - **Raw exchanges.** `Client::exchange` writes a request's initial messages and
   returns a `RawWriter` for what follows (CopyData, CopyDone, CopyFail, Sync),
   which holds the write side until dropped, and `RawResponses`, every backend
@@ -119,3 +122,34 @@ duplicate nonempty pairs and withholds ReadyForQuery before asserting Startup
 is still pending; N+1 returns the original typed count/maximum. No server,
 sleep, retry or partial successful Info is involved. This evidence-only commit
 follows the tested source tip. No push or boundless-branch movement occurred.
+
+## A failed startup keeps what it read (Boundless #452)
+
+Reason: Boundless keeps what a provider returned on a failure (its rule
+"Who owns what", ADR-0032). `connect_raw_with` kept each ParameterStatus and
+NoticeResponse of the startup in `Retained` and `notices` and dropped both
+at every error exit (44d6a78f `tokio-postgres/src/raw.rs:193-199`, `:241-249`,
+`:283-294`), so a startup refused after the server's statuses and notices,
+or cut off by EOF, lost them.
+
+Upstream on this error path: `connect_raw::read_info` (f1cb6ec0
+`tokio-postgres/src/connect_raw.rs:336-367`) collects parameters into a map
+and pushes notices onto `StartupStream::delayed`; an ErrorResponse, EOF or
+I/O error returns `Err` and drops both. Upstream's paths are unchanged.
+
+Change: `connect_raw_with` returns `Result<_, StartupFailure>`, where
+`StartupFailure { error, parameters, notices }` carries the startup's own
+error and what it kept before it, in order, within `max_retained` and
+`max_parameters`. A message past a bound, or one that does not parse, is
+not kept. BackendKeyData is not carried, so the cancel key does not leave a
+failed startup. The body moved into `start`, whose `Retained` and notices
+the wrapper owns; parsing, bounds, authentication and the successful
+`Startup` are unchanged. No retry, close or timeout behaviour changes.
+
+Regression: `a_failed_startup_keeps_what_it_read` (`tokio-postgres --test
+raw`): two statuses and a notice, then FATAL 53300 or EOF; the failure keeps
+both statuses and the notice in order with error kind `Db` or `Closed`.
+`startup_notices_and_parameters_past_the_maximum_end_the_startup` also
+asserts the notice within the maximum is kept and the parameter past it is
+not. With the failure built with empty lists, both fail (exit 101); with the
+change, all 8 pass.

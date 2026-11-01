@@ -176,7 +176,8 @@ async fn negotiate_protocol_version_ends_the_startup() {
     let error = connect_raw_with(client_side, &config(2, 1 << 16), &mut Recorder::default())
         .await
         .err()
-        .unwrap();
+        .unwrap()
+        .error;
     server.await.unwrap();
     assert_eq!(error.kind(), ErrorKind::ProtocolVersion);
     let unsupported = std::error::Error::source(&error)
@@ -201,7 +202,8 @@ async fn a_message_longer_than_the_maximum_is_refused_from_its_header() {
     let error = connect_raw_with(client_side, &config(0, 1024), &mut Recorder::default())
         .await
         .err()
-        .unwrap();
+        .unwrap()
+        .error;
     let _peer = server.await.unwrap();
     assert_eq!(error.kind(), ErrorKind::Parse);
     let io = std::error::Error::source(&error)
@@ -233,11 +235,16 @@ async fn startup_notices_and_parameters_past_the_maximum_end_the_startup() {
     });
     let mut config = config(0, 1 << 16);
     config.max_retained = 40;
-    let error = connect_raw_with(client_side, &config, &mut Recorder::default())
+    let failed = connect_raw_with(client_side, &config, &mut Recorder::default())
         .await
         .err()
         .unwrap();
     let _peer = server.await.unwrap();
+    // The notice within the maximum is kept; the parameter past it is not.
+    assert_eq!(failed.notices.len(), 1);
+    assert_eq!(failed.notices[0].message(), "welcome");
+    assert!(failed.parameters.is_empty());
+    let error = failed.error;
     assert_eq!(error.kind(), ErrorKind::Parse);
     let io = std::error::Error::source(&error)
         .unwrap()
@@ -289,7 +296,9 @@ async fn startup_with_parameters(
     }
     let started = started.await;
     let _peer = server.await.unwrap();
-    started.map(|(_, _, startup)| startup.parameters)
+    started
+        .map(|(_, _, startup)| startup.parameters)
+        .map_err(|failed| failed.error)
 }
 
 #[tokio::test]
@@ -339,7 +348,8 @@ async fn malformed_startup_parameter_keeps_parse_precedence() {
         let error = connect_raw_with(client_side, &config, &mut Recorder::default())
             .await
             .err()
-            .unwrap();
+            .unwrap()
+            .error;
         let _peer = server.await.unwrap();
         assert_eq!(error.kind(), ErrorKind::Parse);
         let io = std::error::Error::source(&error)
@@ -352,6 +362,57 @@ async fn malformed_startup_parameter_keeps_parse_precedence() {
                 .downcast_ref::<std::str::Utf8Error>()
                 .is_some()
         );
+    }
+}
+
+/// A startup the server fails, by an ErrorResponse or by ending the
+/// connection, keeps the parameter statuses and notices it read before.
+#[tokio::test]
+async fn a_failed_startup_keeps_what_it_read() {
+    for eof in [false, true] {
+        let (client_side, mut peer) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            read_startup(&mut peer).await;
+            let mut reply = message(b'R', &0i32.to_be_bytes());
+            reply.extend(parameter("server_version", "18.6"));
+            reply.extend(notice("welcome"));
+            reply.extend(parameter("application_name", "a"));
+            if !eof {
+                let mut body = Vec::new();
+                for (field, value) in [
+                    (b'S', "FATAL"),
+                    (b'V', "FATAL"),
+                    (b'C', "53300"),
+                    (b'M', "too many connections"),
+                ] {
+                    body.push(field);
+                    body.extend(cstr(value));
+                }
+                body.push(0);
+                reply.extend(message(b'E', &body));
+            }
+            peer.write_all(&reply).await.unwrap();
+        });
+        let failed = connect_raw_with(client_side, &config(0, 1 << 16), &mut Recorder::default())
+            .await
+            .err()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            failed.parameters,
+            [
+                ("server_version".to_owned(), "18.6".to_owned()),
+                ("application_name".to_owned(), "a".to_owned()),
+            ]
+        );
+        assert_eq!(failed.notices.len(), 1);
+        assert_eq!(failed.notices[0].message(), "welcome");
+        if eof {
+            assert_eq!(failed.error.kind(), ErrorKind::Closed);
+        } else {
+            assert_eq!(failed.error.kind(), ErrorKind::Db);
+            assert_eq!(failed.error.as_db_error().unwrap().code().code(), "53300");
+        }
     }
 }
 
