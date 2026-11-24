@@ -161,3 +161,26 @@ Upstream inherits the default framed EOF error for a partial backend message and
 The rule is that a reliable stream ending before required input completes reports a receive cut. The check point is PostgresCodec::decode_eof, startup Reader::next and Connection::poll_read. Boundless converts its typed native evidence through network::failure and keeps existing answer and end selection. The regression is protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete. These tests are run with the Boundless integration change for #836.
 
 Upstream submission is deferred under the owner's no-GitHub-writes instruction for this batch.
+
+### Public API and upstream comparison
+
+The public Error kind Closed is also used for unavailable request/reply channels,
+not solely socket EOF; an arbitrary I/O Other likewise proves no EOF. The public
+result does not expose the private PostgresCodec's residual framing state. A
+blanket Closed/Other rewrite could replace another recorded end or classify a
+parser/library failure as a cut. The native byte-read/decoder owners supply the
+actual UnexpectedEof; Boundless's existing NativeLoss and Exchange owners retain
+buffered peer messages and decide the affected reply/connection.
+
+Current upstream Connection::poll_read still maps poll_response(None) to Closed;
+its framed codec has no EOF override. This fork's startup Reader similarly used
+Closed on None. The patch changes those actual socket-EOF producers and residual
+framing EOF only. Request/reply-channel Closed, completed ReadyForQuery,
+FATAL/PANIC reports, Terminate, CancelRequest's own path and parsed messages are
+unchanged; no retry is added.
+
+Regression evidence: at d5e0bbc0802725893a1f47b14eaa171f1b739532 on macOS arm64,
+raw::a_failed_startup_keeps_what_it_read passed with its received statuses/notices.
+Boundless protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete
+passed for startup/query/partial row, using the original inherited-source
+projection where appropriate; FATAL and accepted-prefix controls also passed.
