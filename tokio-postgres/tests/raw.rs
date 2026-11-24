@@ -408,12 +408,7 @@ async fn a_failed_startup_keeps_what_it_read() {
         assert_eq!(failed.notices.len(), 1);
         assert_eq!(failed.notices[0].message(), "welcome");
         if eof {
-            assert_eq!(failed.error.kind(), ErrorKind::Io);
-            let io = std::error::Error::source(&failed.error)
-                .unwrap()
-                .downcast_ref::<std::io::Error>()
-                .unwrap();
-            assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(failed.error.kind(), ErrorKind::Closed);
         } else {
             assert_eq!(failed.error.kind(), ErrorKind::Db);
             assert_eq!(failed.error.as_db_error().unwrap().code().code(), "53300");

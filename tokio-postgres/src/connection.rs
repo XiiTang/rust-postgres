@@ -13,7 +13,6 @@ use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -109,7 +108,7 @@ where
         loop {
             let message = match self.poll_response(cx)? {
                 Poll::Ready(Some(message)) => message,
-                Poll::Ready(None) => return Err(Error::io(io::ErrorKind::UnexpectedEof.into())),
+                Poll::Ready(None) => return Err(Error::closed()),
                 Poll::Pending => {
                     trace!("poll_read: waiting on response");
                     return Ok(None);

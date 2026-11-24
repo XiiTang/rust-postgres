@@ -154,33 +154,29 @@ asserts the notice within the maximum is kept and the parameter past it is
 not. With the failure built with empty lists, both fail (exit 101); with the
 change, all 8 pass.
 
-## Typed receive EOF for unfinished input
+## Retired socket/codec EOF rewrite
 
-Upstream inherits the default framed EOF error for a partial backend message and returns Closed for raw socket EOF during startup or connection reads. The patch supplies typed UnexpectedEof there. Reply-channel Closed stays distinct. Buffered backend messages, ReadyForQuery, server FATAL/PANIC, Terminate, cancellation and protocol parsing retain their owners and paths.
+The batch-C socket-EOF and PostgresCodec::decode_eof changes are retired. The
+public connect_raw_with API takes the stream supplied by Boundless. While the
+connection is Active, every read requires backend message input; the native
+poll_read returns without reading after local Terminate changes that state.
+There is no EOF-delimited backend message. The codec emits buffered complete
+messages before another read. Boundless wraps only this ordinary startup/main
+connection with network::failure::required_input, preserving a real zero read
+as I/O UnexpectedEof before the codec or Reader collapses it to Other/Closed.
+CancelRequest's separately opened socket keeps its own EOF completion contract.
 
-The rule is that a reliable stream ending before required input completes reports a receive cut. The check point is PostgresCodec::decode_eof, startup Reader::next and Connection::poll_read. Boundless converts its typed native evidence through network::failure and keeps existing answer and end selection. The regression is protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete. These tests are run with the Boundless integration change for #836.
+Current upstream poll_read maps response None to Closed and inherits default
+codec EOF handling. Those paths and this fork's raw Reader are restored. No
+Closed or Other error is relabelled by Boundless; only the supplied input's
+actual zero read becomes an I/O error. ReadyForQuery, FATAL/PANIC, buffered
+statuses/notices, malformed frames, Terminate and native request-channel Closed
+keep their existing processing and failure scope.
 
-Upstream submission is deferred under the owner's no-GitHub-writes instruction for this batch.
-
-### Public API and upstream comparison
-
-The public Error kind Closed is also used for unavailable request/reply channels,
-not solely socket EOF; an arbitrary I/O Other likewise proves no EOF. The public
-result does not expose the private PostgresCodec's residual framing state. A
-blanket Closed/Other rewrite could replace another recorded end or classify a
-parser/library failure as a cut. The native byte-read/decoder owners supply the
-actual UnexpectedEof; Boundless's existing NativeLoss and Exchange owners retain
-buffered peer messages and decide the affected reply/connection.
-
-Current upstream Connection::poll_read still maps poll_response(None) to Closed;
-its framed codec has no EOF override. This fork's startup Reader similarly used
-Closed on None. The patch changes those actual socket-EOF producers and residual
-framing EOF only. Request/reply-channel Closed, completed ReadyForQuery,
-FATAL/PANIC reports, Terminate, CancelRequest's own path and parsed messages are
-unchanged; no retry is added.
-
-Regression evidence: at d5e0bbc0802725893a1f47b14eaa171f1b739532 on macOS arm64,
-raw::a_failed_startup_keeps_what_it_read passed with its received statuses/notices.
-Boundless protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete
-passed for startup/query/partial row, using the original inherited-source
-projection where appropriate; FATAL and accepted-prefix controls also passed.
+Regressions: Boundless
+protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete
+covers startup, unanswered query and partial row, with accepted-prefix/FATAL and
+CancelRequest controls in that module. network::failure's required-input adapter
+test checks nonempty versus zero-capacity reads once. Earlier native-change
+evidence at d5e0bbc0802725893a1f47b14eaa171f1b739532 passed on macOS arm64; the
+Boundless-only replacement is verified by the rebased integration run.
