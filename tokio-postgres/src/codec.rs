@@ -99,6 +99,14 @@ impl Decoder for PostgresCodec {
     type Item = BackendMessage;
     type Error = io::Error;
 
+    fn decode_eof(&mut self, src: &mut BytesMut) -> io::Result<Option<BackendMessage>> {
+        match self.decode(src)? {
+            Some(message) => Ok(Some(message)),
+            None if src.is_empty() => Ok(None),
+            None => Err(io::ErrorKind::UnexpectedEof.into()),
+        }
+    }
+
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<BackendMessage>, io::Error> {
         let mut idx = 0;
         let mut request_complete = false;

@@ -158,7 +158,7 @@ where
                 | Some(Ok(BackendMessage::Informational(messages))) => self.buf = messages,
                 Some(Ok(BackendMessage::Async(message))) => return Ok(message),
                 Some(Err(e)) => return Err(read_error(e)),
-                None => return Err(Error::closed()),
+                None => return Err(Error::io(io::ErrorKind::UnexpectedEof.into())),
             }
         }
     }

@@ -153,3 +153,11 @@ both statuses and the notice in order with error kind `Db` or `Closed`.
 asserts the notice within the maximum is kept and the parameter past it is
 not. With the failure built with empty lists, both fail (exit 101); with the
 change, all 8 pass.
+
+## Typed receive EOF for unfinished input
+
+Upstream inherits the default framed EOF error for a partial backend message and returns Closed for raw socket EOF during startup or connection reads. The patch supplies typed UnexpectedEof there. Reply-channel Closed stays distinct. Buffered backend messages, ReadyForQuery, server FATAL/PANIC, Terminate, cancellation and protocol parsing retain their owners and paths.
+
+The rule is that a reliable stream ending before required input completes reports a receive cut. The check point is PostgresCodec::decode_eof, startup Reader::next and Connection::poll_read. Boundless converts its typed native evidence through network::failure and keeps existing answer and end selection. The regression is protocols::postgresql::tests::a_server_ending_the_connection_delivers_nothing_as_complete. These tests are run with the Boundless integration change for #836.
+
+Upstream submission is deferred under the owner's no-GitHub-writes instruction for this batch.
